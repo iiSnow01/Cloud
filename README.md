@@ -72,7 +72,7 @@ Or use the provided `Run Cloudgram.bat` for one-click access.
 Set `CLOUDGRAM_AUTOSYNC=0` before launch only if you want to skip the startup Telegram login and sync flow.
 
 ### First Run
-Upon first launch, you will be prompted to log in to your Telegram account and Cloudgram will sync your Telegram library automatically. Cloudgram keeps `cloudgram_session.session`, `cloudgram.db`, and `cloudgram_launch.log` alongside the app in packaged builds, and alongside the repo in development.
+Upon first launch (if you haven't created an account session before), you will be prompted to enter your Telegram phone number to log in. Once authenticated, Cloudgram will sync your Telegram library automatically. Cloudgram keeps `cloudgram_session.session`, `cloudgram.db`, and `cloudgram_launch.log` alongside the app in packaged builds, and alongside the repo in development.
 
 ---
 
