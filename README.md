@@ -3,7 +3,6 @@
 **Cloudgram** is a high-performance, asynchronous desktop application that transforms your Telegram account into a powerful, unlimited cloud storage solution. Built with a modern aesthetic and deep integration, it provides a seamless file management experience directly on your Windows desktop.
 
 ![Cloudgram Interface Screenshot](screenshot.png)
-*(Note: Replace `screenshot.png` in the root folder with an actual screenshot of the app)*
 
 ---
 
