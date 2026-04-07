@@ -1,9 +1,10 @@
 import os
 import asyncio
-from cloud_auth.login import get_client
 from db.local_db import add_file
 
 async def upload_file_to_telegram(file_path, progress_callback=None, override_type=None):
+    from cloud_auth.login import get_client
+
     client = get_client()
     if not client.is_connected():
         await client.connect()

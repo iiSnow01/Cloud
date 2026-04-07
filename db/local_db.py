@@ -1,7 +1,7 @@
 import sqlite3
-import os
+from runtime_paths import runtime_path
 
-DB_PATH = "cloudgram.db"
+DB_PATH = runtime_path("cloudgram.db")
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)

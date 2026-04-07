@@ -1,910 +1,1073 @@
-from PyQt6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QLabel, QLineEdit, QPushButton, QFrame, QListWidget, QListWidgetItem, QProgressBar, QGridLayout, QScrollArea, QFileDialog, QMessageBox, QMenu, QGraphicsOpacityEffect
-)
-from PyQt6.QtCore import Qt, QPropertyAnimation, QTimer, QRect, QPoint, QEasingCurve, QParallelAnimationGroup
-import qasync
 import asyncio
 import os
-import time
 import shutil
 import tempfile
+import time
 from datetime import datetime
-from core.uploader import upload_file_to_telegram
+
+import qasync
+from PyQt6.QtCore import QPoint, Qt, QTimer
+from PyQt6.QtGui import QPixmap
+from PyQt6.QtWidgets import (
+    QFileDialog,
+    QFrame,
+    QGridLayout,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QListWidget,
+    QListWidgetItem,
+    QMainWindow,
+    QMenu,
+    QPushButton,
+    QProgressBar,
+    QScrollArea,
+    QVBoxLayout,
+    QWidget,
+)
+
 from core.downloader import download_file_from_telegram
+from core.uploader import upload_file_to_telegram
 from db.local_db import get_all_files
 
-# Google integrations (graceful no-op if packages not yet installed)
-try:
-    from cloud_auth.google_auth import is_google_connected, connect_google_async, disconnect_google
-    from core.google_photos import list_media_items, download_media as gp_download_media, download_thumbnail as gp_download_thumbnail
-    from core.gmail_sync import list_messages_with_attachments, download_attachment as gmail_download_attachment
-    GOOGLE_AVAILABLE = True
-except ImportError:
-    GOOGLE_AVAILABLE = False
-    def is_google_connected(): return False
 
-class ToastNotification(QFrame):
+def clear_layout(layout):
+    while layout.count():
+        item = layout.takeAt(0)
+        widget = item.widget()
+        child_layout = item.layout()
+        if widget is not None:
+            widget.deleteLater()
+        elif child_layout is not None:
+            clear_layout(child_layout)
+
+
+def format_size(size: int) -> str:
+    if size >= 1024 * 1024 * 1024:
+        return f"{size / (1024 * 1024 * 1024):.1f} GB"
+    if size >= 1024 * 1024:
+        return f"{size / (1024 * 1024):.1f} MB"
+    if size >= 1024:
+        return f"{size / 1024:.0f} KB"
+    return f"{size} B"
+
+
+def parse_date(date_str: str) -> str:
+    try:
+        return datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S").strftime("%b %d, %H:%M")
+    except Exception:
+        return date_str
+
+
+def visual_for(file_type: str, filename: str) -> tuple[str, str]:
+    ext = os.path.splitext(filename.lower())[1]
+    if file_type == "folder" or ext in {".zip", ".rar", ".7z", ".tar", ".gz"}:
+        return "ZIP", "#e9ddff"
+    if file_type == "image" or ext in {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"}:
+        return "IMG", "#fde6d7"
+    if file_type == "video" or ext in {".mp4", ".mov", ".avi", ".mkv", ".webm"}:
+        return "VID", "#ffe0ea"
+    if ext == ".pdf":
+        return "PDF", "#fde2e2"
+    if ext in {".xls", ".xlsx", ".csv"}:
+        return "XLS", "#dff7e3"
+    return "DOC", "#e5f0ff"
+
+
+class NoticeBar(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFixedSize(300, 80)
-        self.setStyleSheet("""
-            ToastNotification {
-                background-color: #2b2b2b;
+        self.setStyleSheet(
+            """
+            QFrame {
+                background: #f6f8fb;
+                border: 1px solid #d8e0ea;
                 border-radius: 12px;
-                border: 1px solid #444;
             }
-            QLabel { color: #f2f2f2; font-family: 'Segoe UI', Arial; border: none; }
+            QLabel {
+                background: transparent;
+                border: none;
+                color: #243041;
+            }
             QProgressBar {
-                background-color: #404040; border-radius: 4px; max-height: 5px; border: none;
+                background: #dfe7f0;
+                border: none;
+                border-radius: 4px;
+                min-height: 8px;
+                max-height: 8px;
             }
-            QProgressBar::chunk { background-color: #0078D7; border-radius: 4px; }
-        """)
-        
-        self.opacity_effect = QGraphicsOpacityEffect(self)
-        self.setGraphicsEffect(self.opacity_effect)
-        
+            QProgressBar::chunk {
+                background: #2b7fff;
+                border-radius: 4px;
+            }
+            """
+        )
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(18, 14, 18, 14)
-        
-        self.title_label = QLabel("Notification")
-        self.title_label.setStyleSheet("font-weight: bold; font-size: 13px;")
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(6)
+
+        self.title_label = QLabel("")
+        self.title_label.setStyleSheet("font-size: 12px; font-weight: 700;")
         self.desc_label = QLabel("")
-        self.desc_label.setStyleSheet("font-size: 11px; color: #cccccc;")
-        
+        self.desc_label.setWordWrap(True)
+        self.desc_label.setStyleSheet("font-size: 11px; color: #536273;")
         self.progress_bar = QProgressBar()
         self.progress_bar.setTextVisible(False)
-        self.progress_bar.setValue(0)
-        
+        self.progress_bar.hide()
+
         layout.addWidget(self.title_label)
         layout.addWidget(self.desc_label)
         layout.addWidget(self.progress_bar)
-        
-        self.hide()
-        
-        # Animations Setup
-        self.pos_anim = QPropertyAnimation(self, b"pos")
-        self.pos_anim.setDuration(600)
-        self.pos_anim.setEasingCurve(QEasingCurve.Type.OutBack)
-        
-        self.op_anim = QPropertyAnimation(self.opacity_effect, b"opacity")
-        self.op_anim.setDuration(400)
-        
-        self.anim_group = QParallelAnimationGroup()
-        self.anim_group.addAnimation(self.pos_anim)
-        self.anim_group.addAnimation(self.op_anim)
-        
+
         self.hide_timer = QTimer(self)
-        self.hide_timer.timeout.connect(self.fade_out)
         self.hide_timer.setSingleShot(True)
+        self.hide_timer.timeout.connect(self.fade_out)
+        self.hide()
 
     def show_alert(self, title, desc, show_progress=False, auto_hide_ms=3000):
         self.title_label.setText(title)
         self.desc_label.setText(desc)
         self.progress_bar.setVisible(show_progress)
-        self.progress_bar.setValue(0)
-        self.raise_()
+        if show_progress:
+            self.progress_bar.setValue(0)
         self.show()
-        
-        if self.parent():
-            parent_rect = self.parent().rect()
-            start_x = parent_rect.width() - self.width() - 20
-            start_y = parent_rect.height() + 10
-            end_y = parent_rect.height() - self.height() - 20
-        else:
-            start_x, start_y, end_y = 0, 0, 0
-            
-        self.pos_anim.setStartValue(QPoint(start_x, start_y))
-        self.pos_anim.setEndValue(QPoint(start_x, end_y))
-        
-        self.op_anim.setStartValue(0.0)
-        self.op_anim.setEndValue(1.0)
-        
-        try: self.anim_group.finished.disconnect()
-        except: pass
-        self.anim_group.start()
-        
+        self.raise_()
         if auto_hide_ms > 0:
             self.hide_timer.start(auto_hide_ms)
         else:
             self.hide_timer.stop()
 
-    def fade_out(self):
-        start_x = self.x()
-        start_y = self.y()
-        end_y = self.parent().rect().height() + 10 if self.parent() else start_y + 100
-        
-        self.pos_anim.setStartValue(QPoint(start_x, start_y))
-        self.pos_anim.setEndValue(QPoint(start_x, end_y))
-        
-        self.pos_anim.setEasingCurve(QEasingCurve.Type.InBack)
-        
-        self.op_anim.setStartValue(1.0)
-        self.op_anim.setEndValue(0.0)
-        
-        try: self.anim_group.finished.disconnect() 
-        except: pass
-        self.anim_group.finished.connect(self.hide)
-        self.anim_group.start()
-        
     def update_progress(self, desc, percent):
         self.desc_label.setText(desc)
+        self.progress_bar.setVisible(True)
         self.progress_bar.setValue(int(percent))
+        self.show()
+
+    def fade_out(self):
+        self.hide()
+
+    def apply_theme(self, theme_name):
+        return
+
 
 class FileCard(QFrame):
-    def __init__(self, msg_id, filename, size, icon_color, type_label, on_open, on_download, parent=None):
+    def __init__(self, msg_id, filename, meta_text, file_type, on_open, on_download, parent=None):
         super().__init__(parent)
         self.msg_id = msg_id
         self.filename = filename
         self.on_open = on_open
         self.on_download = on_download
-        
-        self.setFixedSize(160, 160)
+
+        short, bg = visual_for(file_type, filename)
+        self.setFixedSize(190, 190)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setStyleSheet("""
-            FileCard { background-color: white; border: 1px solid #e5e5e5; border-radius: 8px; }
-            FileCard:hover { border: 1px solid #d0d0d0; background-color: #fcfcfc; }
-        """)
+        self.setStyleSheet(
+            """
+            FileCard {
+                background: white;
+                border: 1px solid #dfe5ec;
+                border-radius: 14px;
+            }
+            FileCard:hover {
+                border: 1px solid #96bfff;
+                background: #fbfdff;
+            }
+            """
+        )
+
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(15, 15, 15, 15)
-        self.icon_label = QLabel()
-        self.icon_label.setFixedSize(36, 40)
-        self.icon_label.setScaledContents(True)
-        self.icon_label.setStyleSheet(f"background-color: {icon_color}; border-radius: 8px;")
-        layout.addWidget(self.icon_label, alignment=Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(10)
+
+        self.icon_label = QLabel(short)
+        self.icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.icon_label.setFixedSize(64, 64)
+        self.icon_label.setStyleSheet(
+            f"background: {bg}; border-radius: 12px; color: #223047; font-size: 18px; font-weight: 800;"
+        )
+        layout.addWidget(self.icon_label, alignment=Qt.AlignmentFlag.AlignLeft)
+
+        self.name_label = QLabel(filename)
+        self.name_label.setWordWrap(True)
+        self.name_label.setFixedHeight(44)
+        self.name_label.setStyleSheet("font-size: 13px; font-weight: 700; color: #1f2937;")
+        layout.addWidget(self.name_label)
+
+        self.meta_label = QLabel(meta_text)
+        self.meta_label.setStyleSheet("font-size: 11px; color: #667789;")
+        layout.addWidget(self.meta_label)
         layout.addStretch()
-        name_label = QLabel(filename)
-        name_label.setStyleSheet("font-family: 'Segoe UI', Arial; font-weight: 500; font-size: 13px; color: #333; border: none;")
-        name_label.setWordWrap(True)
-        name_label.setFixedHeight(35)
-        size_label = QLabel(size)
-        size_label.setStyleSheet("font-family: 'Segoe UI', Arial; font-size: 11px; color: #888; border: none;")
-        layout.addWidget(name_label)
-        layout.addWidget(size_label)
 
     def update_icon(self, pixmap_path):
-        from PyQt6.QtGui import QPixmap
-        pixmap = QPixmap(pixmap_path).scaled(
-            self.icon_label.size(),
-            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-            Qt.TransformationMode.SmoothTransformation
-        )
-        self.icon_label.setPixmap(pixmap)
-        self.icon_label.setStyleSheet("border-radius: 8px; border: none; background: transparent;")
+        try:
+            pixmap = QPixmap(pixmap_path).scaled(
+                self.icon_label.size(),
+                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            self.icon_label.setPixmap(pixmap)
+            self.icon_label.setText("")
+            self.icon_label.setStyleSheet("border-radius: 12px; background: transparent;")
+        except RuntimeError:
+            return
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             self.on_open(self.msg_id, self.filename)
-            
+        super().mousePressEvent(event)
+
     def contextMenuEvent(self, event):
         menu = QMenu(self)
-        open_action = menu.addAction("Open Live")
-        dl_action = menu.addAction("Download")
-        open_action.triggered.connect(lambda: self.on_open(self.msg_id, self.filename))
-        dl_action.triggered.connect(lambda: self.on_download(self.msg_id, self.filename))
+        menu.addAction("Open", lambda: self.on_open(self.msg_id, self.filename))
+        menu.addAction("Save", lambda: self.on_download(self.msg_id, self.filename))
         menu.exec(event.globalPos())
 
+
 class RecentItem(QFrame):
-    def __init__(self, msg_id, filename, date_str, size_str, icon_color, on_open, on_download, parent=None):
+    def __init__(self, msg_id, filename, date_text, size_text, file_type, on_open, on_download, parent=None):
         super().__init__(parent)
         self.msg_id = msg_id
         self.filename = filename
         self.on_open = on_open
         self.on_download = on_download
 
-        self.setFixedHeight(65)
-        self.setStyleSheet("""
-            RecentItem { background-color: white; border: 1px solid #e5e5e5; border-radius: 8px; margin-bottom: 5px; }
-            RecentItem:hover { background-color: #fbfbfb; border: 1px solid #d0d0d0; }
-        """)
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(15, 10, 15, 10)
-        self.icon_label = QLabel()
-        self.icon_label.setFixedSize(36, 36)
-        self.icon_label.setScaledContents(True)
-        self.icon_label.setStyleSheet(f"background-color: {icon_color}; border-radius: 6px;")
-        layout.addWidget(self.icon_label, alignment=Qt.AlignmentFlag.AlignLeft)
-        text_layout = QVBoxLayout()
-        text_layout.setContentsMargins(15, 0, 0, 0)
-        text_layout.setSpacing(2)
-        name_label = QLabel(filename)
-        name_label.setStyleSheet("font-family: 'Segoe UI', Arial; font-weight: 600; font-size: 13px; color: #222; border: none;")
-        date_label = QLabel(date_str)
-        date_label.setStyleSheet("font-family: 'Segoe UI', Arial; font-size: 11px; color: #777; border: none;")
-        text_layout.addWidget(name_label)
-        text_layout.addWidget(date_label)
-        layout.addLayout(text_layout)
-        layout.addStretch()
-        size_label = QLabel(size_str)
-        size_label.setFixedWidth(60)
-        size_label.setStyleSheet("font-family: 'Segoe UI', Arial; font-size: 12px; color: #555; border: none;")
-        layout.addWidget(size_label, alignment=Qt.AlignmentFlag.AlignRight)
-        
-        self.menu_btn = QPushButton("•••")
-        self.menu_btn.setFixedSize(30, 30)
-        self.menu_btn.setStyleSheet("border: none; font-size: 14px; color: #777; background: transparent;")
-        self.menu_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.menu_btn.clicked.connect(self.show_menu)
-        layout.addWidget(self.menu_btn, alignment=Qt.AlignmentFlag.AlignRight)
+        short, bg = visual_for(file_type, filename)
+        self.setStyleSheet(
+            """
+            RecentItem {
+                background: white;
+                border: 1px solid #dfe5ec;
+                border-radius: 12px;
+            }
+            RecentItem:hover {
+                border: 1px solid #96bfff;
+                background: #fbfdff;
+            }
+            """
+        )
 
-    def show_menu(self):
-        menu = QMenu(self)
-        open_action = menu.addAction("Open Live")
-        dl_action = menu.addAction("Download")
-        open_action.triggered.connect(lambda: self.on_open(self.msg_id, self.filename))
-        dl_action.triggered.connect(lambda: self.on_download(self.msg_id, self.filename))
-        menu.exec(self.menu_btn.mapToGlobal(self.menu_btn.rect().bottomLeft()))
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(12)
+
+        self.icon_label = QLabel(short)
+        self.icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.icon_label.setFixedSize(46, 46)
+        self.icon_label.setStyleSheet(
+            f"background: {bg}; border-radius: 10px; color: #223047; font-size: 12px; font-weight: 800;"
+        )
+        layout.addWidget(self.icon_label)
+
+        text_col = QVBoxLayout()
+        text_col.setSpacing(3)
+        self.name_label = QLabel(filename)
+        self.name_label.setStyleSheet("font-size: 13px; font-weight: 700; color: #1f2937;")
+        self.date_label = QLabel(date_text)
+        self.date_label.setStyleSheet("font-size: 11px; color: #667789;")
+        text_col.addWidget(self.name_label)
+        text_col.addWidget(self.date_label)
+        layout.addLayout(text_col, 1)
+
+        self.size_label = QLabel(size_text)
+        self.size_label.setStyleSheet("font-size: 11px; color: #667789;")
+        layout.addWidget(self.size_label)
+
+        open_btn = QPushButton("Open")
+        save_btn = QPushButton("Save")
+        for btn in (open_btn, save_btn):
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setFixedSize(60, 32)
+            btn.setStyleSheet(
+                """
+                QPushButton {
+                    background: #f5f8fc;
+                    border: 1px solid #d7e0ea;
+                    border-radius: 8px;
+                    color: #243041;
+                    font-size: 11px;
+                    font-weight: 700;
+                }
+                QPushButton:hover {
+                    border: 1px solid #96bfff;
+                    background: #eef5ff;
+                }
+                """
+            )
+        open_btn.clicked.connect(lambda: self.on_open(self.msg_id, self.filename))
+        save_btn.clicked.connect(lambda: self.on_download(self.msg_id, self.filename))
+        layout.addWidget(open_btn)
+        layout.addWidget(save_btn)
 
     def update_icon(self, pixmap_path):
-        from PyQt6.QtGui import QPixmap
-        pixmap = QPixmap(pixmap_path).scaled(
-            self.icon_label.size(),
-            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-            Qt.TransformationMode.SmoothTransformation
+        try:
+            pixmap = QPixmap(pixmap_path).scaled(
+                self.icon_label.size(),
+                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            self.icon_label.setPixmap(pixmap)
+            self.icon_label.setText("")
+            self.icon_label.setStyleSheet("border-radius: 10px; background: transparent;")
+        except RuntimeError:
+            return
+
+
+class MacTitleBar(QFrame):
+    def __init__(self, window, parent=None):
+        super().__init__(parent)
+        self.window = window
+        self._drag_offset = None
+        self.setFixedHeight(46)
+        self.setStyleSheet(
+            """
+            MacTitleBar {
+                background: #ffffff;
+                border-bottom: 1px solid #d7e0ea;
+                border-top-left-radius: 16px;
+                border-top-right-radius: 16px;
+            }
+            QLabel {
+                background: transparent;
+                border: none;
+                color: #243041;
+            }
+            QPushButton {
+                border: none;
+                border-radius: 7px;
+            }
+            """
         )
-        self.icon_label.setPixmap(pixmap)
-        self.icon_label.setStyleSheet("border-radius: 6px; border: none; background: transparent;")
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(14, 8, 14, 8)
+        layout.setSpacing(10)
+
+        controls = QWidget()
+        controls.setFixedWidth(74)
+        controls_layout = QHBoxLayout(controls)
+        controls_layout.setContentsMargins(0, 0, 0, 0)
+        controls_layout.setSpacing(8)
+
+        self.min_btn = self._build_dot("#febc2e", "Minimize")
+        self.max_btn = self._build_dot("#28c840", "Maximize")
+        self.close_btn = self._build_dot("#ff5f57", "Close")
+        self.close_btn.clicked.connect(self.window.close)
+        self.min_btn.clicked.connect(self.window.showMinimized)
+        self.max_btn.clicked.connect(self.toggle_maximize)
+
+        controls_layout.addWidget(self.min_btn)
+        controls_layout.addWidget(self.max_btn)
+        controls_layout.addWidget(self.close_btn)
+        controls_layout.addStretch()
+
+        self.title_label = QLabel(self.window.windowTitle())
+        self.title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.title_label.setStyleSheet("font-size: 12px; font-weight: 800;")
+
+        left_spacer = QWidget()
+        left_spacer.setFixedWidth(74)
+
+        layout.addWidget(left_spacer)
+        layout.addStretch()
+        layout.addWidget(self.title_label)
+        layout.addStretch()
+        layout.addWidget(controls)
+
+    def _build_dot(self, color: str, tooltip: str) -> QPushButton:
+        button = QPushButton()
+        button.setFixedSize(14, 14)
+        button.setToolTip(tooltip)
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        button.setStyleSheet(
+            f"""
+            QPushButton {{
+                background: {color};
+                border: 1px solid rgba(0, 0, 0, 0.14);
+                border-radius: 7px;
+            }}
+            QPushButton:hover {{
+                border: 1px solid rgba(0, 0, 0, 0.28);
+            }}
+            """
+        )
+        return button
+
+    def toggle_maximize(self):
+        if self.window.isMaximized():
+            self.window.showNormal()
+        else:
+            self.window.showMaximized()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_offset = event.globalPosition().toPoint() - self.window.frameGeometry().topLeft()
+            event.accept()
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if (
+            self._drag_offset is not None
+            and event.buttons() & Qt.MouseButton.LeftButton
+            and not self.window.isMaximized()
+        ):
+            self.window.move(event.globalPosition().toPoint() - self._drag_offset)
+            event.accept()
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self._drag_offset = None
+        super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.toggle_maximize()
+            event.accept()
+        super().mouseDoubleClickEvent(event)
+
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Cloudgram")
-        self.resize(1000, 700)
-        self.setStyleSheet("background-color: white; font-family: 'Segoe UI', Arial;")
+        self.resize(1100, 760)
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Window)
+        self.setStyleSheet("QMainWindow { background: #dfe6ee; }")
+        self.current_category = "All files"
+
         central = QWidget()
         self.setCentralWidget(central)
-        main_layout = QHBoxLayout(central)
-        main_layout.setContentsMargins(0, 0, 0, 0)
-        main_layout.setSpacing(0)
-        
-        # Sidebar
+        root = QVBoxLayout(central)
+        root.setContentsMargins(10, 10, 10, 10)
+        root.setSpacing(0)
+
+        shell = QFrame()
+        shell.setObjectName("WindowShell")
+        shell.setStyleSheet(
+            """
+            #WindowShell {
+                background: #f5f7fb;
+                border: 1px solid #d7e0ea;
+                border-radius: 16px;
+            }
+            """
+        )
+        shell_layout = QVBoxLayout(shell)
+        shell_layout.setContentsMargins(0, 0, 0, 0)
+        shell_layout.setSpacing(0)
+
+        self.title_bar = MacTitleBar(self)
+        shell_layout.addWidget(self.title_bar)
+
+        body = QWidget()
+        body_layout = QHBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(0)
+
         sidebar = QFrame()
-        sidebar.setFixedWidth(240)
-        sidebar.setStyleSheet("QFrame { background-color: #f4f3f0; border-right: 1px solid #e0e0e0; }")
+        sidebar.setFixedWidth(220)
+        sidebar.setStyleSheet(
+            "QFrame { background: #eef2f7; border-right: 1px solid #d8e0ea; border-bottom-left-radius: 16px; }"
+        )
         sidebar_layout = QVBoxLayout(sidebar)
-        sidebar_layout.setContentsMargins(20, 25, 20, 20)
-        
-        logo_layout = QHBoxLayout()
-        logo_icon = QLabel()
-        logo_icon.setFixedSize(32, 32)
-        logo_icon.setStyleSheet("background-color: #1a73e8; border-radius: 8px;") 
-        logo_text = QLabel("Cloudgram")
-        logo_text.setStyleSheet("font-family: 'Segoe UI', Arial; font-size: 18px; font-weight: bold; color: #111; border: none;")
-        logo_layout.addWidget(logo_icon)
-        logo_layout.addSpacing(5)
-        logo_layout.addWidget(logo_text)
-        logo_layout.addStretch()
-        sidebar_layout.addLayout(logo_layout)
-        sidebar_layout.addSpacing(40)
-        
+        sidebar_layout.setContentsMargins(18, 20, 18, 18)
+        sidebar_layout.setSpacing(14)
+
+        title = QLabel("Cloudgram")
+        title.setStyleSheet("font-size: 20px; font-weight: 800; color: #18212b;")
+        subtitle = QLabel("Telegram file organizer")
+        subtitle.setStyleSheet("font-size: 11px; color: #667789;")
+        sidebar_layout.addWidget(title)
+        sidebar_layout.addWidget(subtitle)
+
         self.nav_list = QListWidget()
-        self.nav_list.setStyleSheet("""
-            QListWidget { background: transparent; border: none; outline: none; }
-            QListWidget::item { height: 42px; border-radius: 8px; padding-left: 10px; color: #444; font-size: 14px; font-weight: 500; }
-            QListWidget::item:selected { background-color: white; color: #111; font-weight: bold; border: 1px solid #e0e0e0; }
-            QListWidget::item:hover:!selected { background-color: #ebebeb; }
-            QListWidget::item:focus { border: none; }
-        """)
-        for txt, sel in [("   All files", True), ("   Folders", False), ("   Gallery", False), ("   Uploads", False), ("   Google Photos", False), ("   Gmail", False), ("   Trash", False)]:
-            it = QListWidgetItem(txt)
-            if sel: it.setSelected(True)
-            self.nav_list.addItem(it)
-        
-        self.current_category = "All files"
-        self._gp_cache = {}  # mediaItemId -> Google Photos item dict
+        self.nav_list.setStyleSheet(
+            """
+            QListWidget {
+                background: transparent;
+                border: none;
+                outline: none;
+                color: #334155;
+            }
+            QListWidget::item {
+                height: 42px;
+                border-radius: 10px;
+                margin: 2px 0;
+                padding-left: 12px;
+                font-size: 13px;
+                font-weight: 700;
+            }
+            QListWidget::item:selected {
+                background: white;
+                border: 1px solid #d7e0ea;
+                color: #111827;
+            }
+            QListWidget::item:hover:!selected {
+                background: #e4ebf3;
+            }
+            """
+        )
+        for text in ("All files", "Folders", "Gallery", "Uploads"):
+            item = QListWidgetItem(text)
+            self.nav_list.addItem(item)
+        self.nav_list.setCurrentRow(0)
         self.nav_list.itemSelectionChanged.connect(self.on_category_changed)
-
         sidebar_layout.addWidget(self.nav_list)
-        sidebar_layout.addSpacing(12)
-
-        # Google Account connect / disconnect button
-        self.google_btn = QPushButton()
-        self.google_btn.setFixedHeight(36)
-        self.google_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._refresh_google_btn()
-        self.google_btn.clicked.connect(self._toggle_google)
-        sidebar_layout.addWidget(self.google_btn)
         sidebar_layout.addStretch()
-        
-        storage_frame = QFrame()
-        storage_frame.setStyleSheet("QFrame { background-color: white; border: 1px solid #e5e5e5; border-radius: 10px; }")
-        storage_layout = QVBoxLayout(storage_frame)
-        storage_layout.setContentsMargins(15, 15, 15, 15)
-        s_title = QLabel("Storage used")
-        s_title.setStyleSheet("font-size: 12px; color: #444; border: none; font-weight: 500;")
-        progress = QProgressBar()
-        progress.setFixedHeight(6)
-        progress.setTextVisible(False)
-        progress.setValue(20)
-        progress.setStyleSheet("QProgressBar { background-color: #e6e6e6; border-radius: 3px; border: none; } QProgressBar::chunk { background-color: #1a73e8; border-radius: 3px; }")
-        s_desc = QLabel("1.8 GB of unlimited")
-        s_desc.setStyleSheet("font-size: 11px; color: #777; border: none;")
-        storage_layout.addWidget(s_title)
-        storage_layout.addWidget(progress)
-        storage_layout.addWidget(s_desc)
-        sidebar_layout.addWidget(storage_frame)
-        main_layout.addWidget(sidebar)
-        
-        # Main Area
-        main_content = QFrame()
-        main_content.setStyleSheet("background-color: white; border: none;")
-        content_layout = QVBoxLayout(main_content)
-        content_layout.setContentsMargins(40, 30, 40, 20)
-        top_bar = QHBoxLayout()
+
+        self.index_label = QLabel("Local index: 0 files")
+        self.index_label.setWordWrap(True)
+        self.index_label.setStyleSheet("font-size: 11px; color: #667789;")
+        sidebar_layout.addWidget(self.index_label)
+        body_layout.addWidget(sidebar)
+
+        content = QFrame()
+        content.setStyleSheet("QFrame { background: #f5f7fb; border-bottom-right-radius: 16px; }")
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(24, 22, 24, 22)
+        content_layout.setSpacing(14)
+
+        header = QHBoxLayout()
+        header_text = QVBoxLayout()
+        self.hero_title = QLabel("All files")
+        self.hero_title.setStyleSheet("font-size: 28px; font-weight: 800; color: #111827;")
+        self.hero_subtitle = QLabel("Files already indexed from your Telegram Saved Messages.")
+        self.hero_subtitle.setStyleSheet("font-size: 12px; color: #667789;")
+        header_text.addWidget(self.hero_title)
+        header_text.addWidget(self.hero_subtitle)
+        header.addLayout(header_text)
+        header.addStretch()
+
+        self.count_label = QLabel("0 items")
+        self.count_label.setStyleSheet(
+            "background: white; border: 1px solid #d7e0ea; border-radius: 12px; padding: 10px 14px; font-size: 12px; font-weight: 700; color: #243041;"
+        )
+        header.addWidget(self.count_label)
+        content_layout.addLayout(header)
+
+        toolbar = QFrame()
+        toolbar.setStyleSheet("QFrame { background: white; border: 1px solid #d7e0ea; border-radius: 14px; }")
+        toolbar_row = QHBoxLayout(toolbar)
+        toolbar_row.setContentsMargins(14, 14, 14, 14)
+        toolbar_row.setSpacing(10)
+
         self.search_box = QLineEdit()
-        self.search_box.setPlaceholderText("Search files...")
-        self.search_box.setFixedHeight(40)
-        self.search_box.setStyleSheet("QLineEdit { background-color: #f6f6f6; border: 1px solid #eaeaea; border-radius: 8px; padding-left: 15px; font-size: 13px; color: #333; } QLineEdit:focus { border: 1px solid #1a73e8; background-color: white; }")
+        self.search_box.setPlaceholderText("Search files")
+        self.search_box.setClearButtonEnabled(True)
+        self.search_box.setFixedHeight(42)
+        self.search_box.setStyleSheet(
+            "QLineEdit { background: #f7f9fc; border: 1px solid #d7e0ea; border-radius: 10px; padding: 0 12px; font-size: 13px; color: #243041; }"
+            " QLineEdit:focus { border: 1px solid #7baeff; background: white; }"
+        )
         self.search_box.textChanged.connect(self.load_files)
-        grid_btn = QPushButton(u"\u25A6") 
-        list_btn = QPushButton(u"\u2630") 
-        for btn in (grid_btn, list_btn):
-            btn.setFixedSize(40, 40)
-            btn.setStyleSheet("QPushButton { background-color: white; border: 1px solid #e5e5e5; border-radius: 8px; font-size: 20px; color: #555; }")
-        self.upload_btn = QPushButton("Upload ▼")
-        self.upload_btn.setFixedHeight(40)
-        self.upload_btn.setFixedWidth(120)
-        self.upload_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.upload_btn.setStyleSheet("""
-            QPushButton { background-color: #1a73e8; color: white; font-weight: bold; border-radius: 8px; border: none; font-size: 14px; }
-            QPushButton:hover { background-color: #1557b0; }
-        """)
-        
+        toolbar_row.addWidget(self.search_box, 1)
+
+        self.sync_btn = QPushButton("Sync Telegram")
+        self.upload_btn = QPushButton("Upload")
+        for btn in (self.sync_btn, self.upload_btn):
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setFixedHeight(42)
+            btn.setStyleSheet(
+                """
+                QPushButton {
+                    background: #f5f8fc;
+                    border: 1px solid #d7e0ea;
+                    border-radius: 10px;
+                    padding: 0 16px;
+                    color: #243041;
+                    font-size: 12px;
+                    font-weight: 800;
+                }
+                QPushButton:hover {
+                    background: #eef5ff;
+                    border: 1px solid #96bfff;
+                }
+                QPushButton:disabled {
+                    color: #94a3b8;
+                }
+                """
+            )
+        self.sync_btn.clicked.connect(self.action_sync_telegram)
+
         self.upload_menu = QMenu(self)
-        self.upload_menu.addAction("Upload File(s)", self.action_upload_file)
-        self.upload_menu.addAction("Upload Folder (as Zip)", self.action_upload_folder)
-        
+        self.upload_menu.addAction("Upload file(s)", self.action_upload_file)
+        self.upload_menu.addAction("Upload folder as zip", self.action_upload_folder)
         self.upload_btn.setMenu(self.upload_menu)
-        
-        top_bar.addWidget(self.search_box)
-        top_bar.addSpacing(20)
-        top_bar.addWidget(grid_btn)
-        top_bar.addWidget(list_btn)
-        top_bar.addWidget(self.upload_btn)
-        content_layout.addLayout(top_bar)
-        content_layout.addSpacing(20)
-        
-        scroll_area = QScrollArea()
-        scroll_area.setWidgetResizable(True)
-        scroll_area.setStyleSheet("QScrollArea { border: none; background: transparent; }")
-        scroll_content = QWidget()
-        scroll_layout = QVBoxLayout(scroll_content)
-        
-        pinned_lbl = QLabel("PINNED")
-        pinned_lbl.setStyleSheet("color: #777; font-size: 12px; font-weight: bold; letter-spacing: 1px; border: none;")
-        scroll_layout.addWidget(pinned_lbl)
-        self.pinned_grid = QGridLayout()
-        self.pinned_grid.setAlignment(Qt.AlignmentFlag.AlignLeft)
-        scroll_layout.addLayout(self.pinned_grid)
-        scroll_layout.addSpacing(40)
-        
-        recent_lbl = QLabel("RECENT")
-        recent_lbl.setStyleSheet("color: #777; font-size: 12px; font-weight: bold; letter-spacing: 1px; border: none;")
-        scroll_layout.addWidget(recent_lbl)
-        
-        self.recent_list = QVBoxLayout()
-        scroll_layout.addLayout(self.recent_list)
-        scroll_layout.addStretch()
-        
-        scroll_area.setWidget(scroll_content)
-        content_layout.addWidget(scroll_area)
-        main_layout.addWidget(main_content)
-        
-        self.toast = ToastNotification(self)
-        
-        # self.load_files() # Loaded manually in main.py to prevent startup hang
+        toolbar_row.addWidget(self.sync_btn)
+        toolbar_row.addWidget(self.upload_btn)
+        content_layout.addWidget(toolbar)
+        content_layout.addWidget(self._build_account_panel())
+
+        self.toast = NoticeBar()
+        content_layout.addWidget(self.toast)
+        self._schedule_coro(self.refresh_account_status())
+
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+
+        self.scroll_content = QWidget()
+        self.scroll_layout = QVBoxLayout(self.scroll_content)
+        self.scroll_layout.setContentsMargins(0, 0, 0, 0)
+        self.scroll_layout.setSpacing(14)
+
+        self.pinned_title = QLabel("Pinned")
+        self.pinned_title.setStyleSheet("font-size: 12px; font-weight: 800; color: #667789;")
+        self.pinned_wrap = QWidget()
+        self.pinned_grid = QGridLayout(self.pinned_wrap)
+        self.pinned_grid.setContentsMargins(0, 0, 0, 0)
+        self.pinned_grid.setHorizontalSpacing(14)
+        self.pinned_grid.setVerticalSpacing(14)
+
+        self.results_title = QLabel("Items")
+        self.results_title.setStyleSheet("font-size: 12px; font-weight: 800; color: #667789;")
+        self.results_wrap = QWidget()
+        self.results_layout = QVBoxLayout(self.results_wrap)
+        self.results_layout.setContentsMargins(0, 0, 0, 0)
+        self.results_layout.setSpacing(10)
+
+        self.scroll_layout.addWidget(self.pinned_title)
+        self.scroll_layout.addWidget(self.pinned_wrap)
+        self.scroll_layout.addWidget(self.results_title)
+        self.scroll_layout.addWidget(self.results_wrap)
+        self.scroll_layout.addStretch()
+        self.scroll_area.setWidget(self.scroll_content)
+        content_layout.addWidget(self.scroll_area, 1)
+
+        body_layout.addWidget(content, 1)
+        shell_layout.addWidget(body, 1)
+        root.addWidget(shell)
+
+    def _build_account_panel(self):
+        frame = QFrame()
+        frame.setStyleSheet("QFrame { background: white; border: 1px solid #d7e0ea; border-radius: 14px; }")
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(6)
+
+        status_row = QHBoxLayout()
+        status_row.setSpacing(8)
+        status_label = QLabel("Account status:")
+        status_label.setStyleSheet("font-size: 11px; color: #667789;")
+        self.account_status_label = QLabel("Not signed in")
+        self.account_status_label.setStyleSheet("font-size: 13px; font-weight: 700; color: #1f2937;")
+        status_row.addWidget(status_label)
+        status_row.addWidget(self.account_status_label)
+        status_row.addStretch()
+
+        self.logout_btn = QPushButton("Log out")
+        self.logout_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.logout_btn.setFixedHeight(36)
+        self.logout_btn.setEnabled(False)
+        self.logout_btn.setStyleSheet(
+            """
+            QPushButton {
+                background: #ffecec;
+                border: 1px solid #f1a8a8;
+                border-radius: 12px;
+                padding: 0 16px;
+                color: #b91c1c;
+                font-size: 12px;
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                background: #ffdada;
+            }
+            QPushButton:disabled {
+                color: #f8d7da;
+                border-color: #f8d7da;
+                background: #fff5f5;
+            }
+            """
+        )
+        self.logout_btn.clicked.connect(self.action_logout)
+        status_row.addWidget(self.logout_btn)
+        layout.addLayout(status_row)
+
+        form_row = QHBoxLayout()
+        form_row.setSpacing(10)
+        self.account_phone_input = QLineEdit()
+        self.account_phone_input.setPlaceholderText("+1 234 567 8900")
+        self.account_phone_input.setFixedHeight(40)
+        self.account_phone_input.setStyleSheet(
+            "QLineEdit { background: #f7f9fc; border: 1px solid #d7e0ea; border-radius: 12px; padding: 0 12px; font-size: 12px; color: #243041; }"
+            " QLineEdit:focus { border: 1px solid #7baeff; background: white; }"
+        )
+        form_row.addWidget(self.account_phone_input, 1)
+
+        self.signin_btn = QPushButton("Sign in")
+        self.signin_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.signin_btn.setFixedHeight(40)
+        self.signin_btn.setStyleSheet(
+            """
+            QPushButton {
+                background: #f5f8fc;
+                border: 1px solid #d7e0ea;
+                border-radius: 12px;
+                padding: 0 16px;
+                color: #243041;
+                font-size: 12px;
+                font-weight: 700;
+            }
+            QPushButton:hover {
+                background: #eef5ff;
+                border: 1px solid #96bfff;
+            }
+            QPushButton:disabled {
+                color: #94a3b8;
+            }
+            """
+        )
+        self.signin_btn.clicked.connect(self.action_open_login)
+        form_row.addWidget(self.signin_btn)
+
+        self.account_phone_input.returnPressed.connect(self.signin_btn.click)
+        layout.addLayout(form_row)
+        return frame
 
     def on_category_changed(self):
         items = self.nav_list.selectedItems()
-        if items:
-            self.current_category = items[0].text().strip()
-            if self.current_category == "Google Photos":
-                asyncio.create_task(self._load_google_photos())
-            elif self.current_category == "Gmail":
-                asyncio.create_task(self._load_gmail())
-            else:
-                self.load_files()
+        if not items:
+            return
+        self.current_category = items[0].text().strip()
+        self.hero_title.setText(self.current_category)
+        copy = {
+            "All files": "Files already indexed from your Telegram Saved Messages.",
+            "Folders": "Archive items synced from Telegram or uploaded as zipped folders.",
+            "Gallery": "Photos and videos from Telegram Saved Messages.",
+            "Uploads": "Documents and general files from Telegram.",
+        }
+        self.hero_subtitle.setText(copy.get(self.current_category, "Telegram library"))
+        self.load_files()
 
-    def load_files(self):
-        query = self.search_box.text().lower()
-        rows = get_all_files()
-        
-        filtered_rows = []
-        for r in rows:
-            db_id, msg_id, name, size, type_, date_str, pinned = r
-            if self.current_category == "Folders" and type_ != "folder":
+    def _filter_rows(self, rows):
+        query = self.search_box.text().lower().strip()
+        filtered = []
+        for row in rows:
+            _, _, name, _, file_type, _, _ = row
+            if self.current_category == "Folders" and file_type != "folder":
                 continue
-            if self.current_category == "Gallery" and type_ not in ("image", "video"):
+            if self.current_category == "Gallery" and file_type not in ("image", "video"):
                 continue
-            if self.current_category == "Uploads" and type_ not in ("document"):
+            if self.current_category == "Uploads" and file_type != "document":
                 continue
-            if self.current_category == "Trash": # Trash not implemented yet
-                continue
-            filtered_rows.append(r)
-            
-        rows = filtered_rows
-            
-        # Clear existing
-        while self.pinned_grid.count():
-            item = self.pinned_grid.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-                
-        while self.recent_list.count():
-            item = self.recent_list.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-                
-        row, col = 0, 0
-        for r in rows:
-            # r: (id, message_id, file_name, file_size, file_type, uploaded_at, is_pinned)
-            db_id, msg_id, name, size, type_, date_str, pinned = r
             if query and query not in name.lower():
                 continue
-            
-            # Formatting size
-            if size > 1024 * 1024:
-                size_str = f"{size / (1024 * 1024):.1f} MB"
+            filtered.append(row)
+        return filtered
+
+    def load_files(self):
+        rows = get_all_files()
+        filtered_rows = self._filter_rows(rows)
+        self.index_label.setText(f"Local index: {len(rows)} files")
+        self.count_label.setText(f"{len(filtered_rows)} items")
+        self._render_rows(filtered_rows)
+
+    def _render_rows(self, rows):
+        clear_layout(self.pinned_grid)
+        clear_layout(self.results_layout)
+
+        pinned_rows = [row for row in rows if row[6]]
+        other_rows = [row for row in rows if not row[6]]
+
+        self.pinned_title.setVisible(bool(pinned_rows))
+        self.pinned_wrap.setVisible(bool(pinned_rows))
+        self.results_title.setText("Gallery" if self.current_category == "Gallery" else "Items")
+
+        for index, row in enumerate(pinned_rows):
+            _, msg_id, name, size, file_type, date_str, _ = row
+            card = FileCard(
+                msg_id,
+                name,
+                f"{format_size(size)}   |   {parse_date(date_str)}",
+                file_type,
+                self.handle_open,
+                self.handle_download,
+            )
+            self.pinned_grid.addWidget(card, index // 4, index % 4)
+            if file_type in ("image", "video"):
+                self._schedule_coro(self.load_thumbnail(msg_id, card))
+
+        if not other_rows and not pinned_rows:
+            empty = QLabel("Nothing to show in this view.")
+            empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            empty.setStyleSheet(
+                "background: white; border: 1px solid #d7e0ea; border-radius: 14px; padding: 28px; font-size: 13px; color: #667789;"
+            )
+            self.results_layout.addWidget(empty)
+            return
+
+        if self.current_category == "Gallery":
+            grid_wrap = QWidget()
+            grid = QGridLayout(grid_wrap)
+            grid.setContentsMargins(0, 0, 0, 0)
+            grid.setHorizontalSpacing(14)
+            grid.setVerticalSpacing(14)
+            for index, row in enumerate(other_rows):
+                _, msg_id, name, size, file_type, date_str, _ = row
+                card = FileCard(
+                    msg_id,
+                    name,
+                    f"{format_size(size)}   |   {parse_date(date_str)}",
+                    file_type,
+                    self.handle_open,
+                    self.handle_download,
+                )
+                grid.addWidget(card, index // 4, index % 4)
+                if file_type in ("image", "video"):
+                    self._schedule_coro(self.load_thumbnail(msg_id, card))
+            self.results_layout.addWidget(grid_wrap)
+            return
+
+        for row in other_rows:
+            _, msg_id, name, size, file_type, date_str, _ = row
+            item = RecentItem(
+                msg_id,
+                name,
+                parse_date(date_str),
+                format_size(size),
+                file_type,
+                self.handle_open,
+                self.handle_download,
+            )
+            self.results_layout.addWidget(item)
+            if file_type in ("image", "video"):
+                self._schedule_coro(self.load_thumbnail(msg_id, item))
+
+    async def refresh_account_status(self):
+        from cloud_auth.login import get_client
+
+        client = get_client()
+        try:
+            if not client.is_connected():
+                await asyncio.wait_for(client.connect(), timeout=12)
+        except asyncio.TimeoutError:
+            self.account_status_label.setText("Telegram offline")
+            self.logout_btn.setEnabled(False)
+            self.signin_btn.setEnabled(True)
+            self.account_phone_input.setEnabled(True)
+            return
+        except Exception:
+            self.account_status_label.setText("Telegram unavailable")
+            self.logout_btn.setEnabled(False)
+            self.signin_btn.setEnabled(True)
+            self.account_phone_input.setEnabled(True)
+            return
+
+        if not await client.is_user_authorized():
+            self.account_status_label.setText("Not signed in")
+            self.logout_btn.setEnabled(False)
+            self.signin_btn.setText("Sign in")
+            self.signin_btn.setEnabled(True)
+            self.account_phone_input.setEnabled(True)
+            return
+
+        try:
+            me = await client.get_me()
+        except Exception:
+            me = None
+
+        label_text = "Signed in"
+        if me:
+            number = getattr(me, "phone", None)
+            username = getattr(me, "username", None)
+            if number:
+                label_text = f"Signed in as {number}"
+                self.account_phone_input.setText(number)
+                self.account_phone_input.setEnabled(False)
+            elif username:
+                label_text = f"Signed in as @{username}"
             else:
-                size_str = f"{size / 1024:.0f} KB"
-                
-            color = "#d6ebff"
-            if type_ == 'image': color = "#fdeadd"
-            elif type_ == 'video': color = "#fed6e3"
-            elif type_ == 'document': color = "#e0f2d8"
-            elif type_ == 'folder': color = "#e7dffd"
-            
-            if pinned:
-                card = FileCard(msg_id, name, size_str, color, type_.capitalize(), self.handle_open, self.handle_download)
-                self.pinned_grid.addWidget(card, row, col)
-                col += 1
-                if col > 3:
-                    col = 0
-                    row += 1
-                
-                if type_ in ('image', 'video'):
-                    import asyncio
-                    asyncio.create_task(self.load_thumbnail(msg_id, card))
-            else:
-                try: # try parsing sqlite date to something nice
-                    date_obj = datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S")
-                    fmt_date = date_obj.strftime("%b %d, %H:%M")
-                except:
-                    fmt_date = date_str
-                    
-                item = RecentItem(msg_id, name, fmt_date, size_str, color, self.handle_open, self.handle_download)
-                self.recent_list.addWidget(item)
-                
-                if type_ in ('image', 'video'):
-                    import asyncio
-                    asyncio.create_task(self.load_thumbnail(msg_id, item))
+                label_text = f"Signed in as {getattr(me, 'id', 'user')}"
+
+        self.account_status_label.setText(label_text)
+        self.logout_btn.setEnabled(True)
+        self.signin_btn.setText("Re-sync")
+        self.signin_btn.setEnabled(True)
+
+    async def _ensure_logged_in(self, prefill=None):
+        from cloud_auth.login import get_client
+        from ui.login_screen import LoginScreen
+
+        client = get_client()
+        try:
+            if not client.is_connected():
+                await asyncio.wait_for(client.connect(), timeout=20)
+        except asyncio.TimeoutError:
+            self.toast.show_alert("Telegram offline", "Connection timed out.", False, 5000)
+            return False
+        except Exception:
+            self.toast.show_alert("Telegram error", "Unable to reach Telegram.", False, 5000)
+            return False
+
+        if await client.is_user_authorized():
+            return True
+
+        login_phone = prefill or self.account_phone_input.text().strip()
+        login_screen = LoginScreen(client, parent=self, initial_phone=login_phone or None)
+        login_screen.show()
+        await login_screen.wait_for_login()
+        if await client.is_user_authorized():
+            self.toast.show_alert("Login complete", "Telegram account is ready.", False, 3000)
+            self._schedule_coro(self.refresh_account_status())
+            return True
+
+        self.toast.show_alert("Login required", "Telegram login was not completed.", False, 4000)
+        return False
+
+    @qasync.asyncSlot()
+    async def action_open_login(self):
+        self.signin_btn.setEnabled(False)
+        try:
+            await self._ensure_logged_in(prefill=self.account_phone_input.text().strip())
+        finally:
+            self.signin_btn.setEnabled(True)
+
+    @qasync.asyncSlot()
+    async def action_logout(self):
+        from cloud_auth.login import get_client, SESSION_NAME
+
+        self.logout_btn.setEnabled(False)
+        client = get_client()
+        try:
+            await client.log_out()
+        except Exception:
+            pass
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+
+        for suffix in (".session", ".session-journal"):
+            session_path = f"{SESSION_NAME}{suffix}"
+            if os.path.exists(session_path):
+                try:
+                    os.remove(session_path)
+                except Exception:
+                    pass
+
+        self.account_phone_input.clear()
+        self.account_phone_input.setEnabled(True)
+        self.account_status_label.setText("Signed out")
+        self.signin_btn.setText("Sign in")
+        self.toast.show_alert("Logged out", "Telegram session cleared.", False, 4000)
+        self._schedule_coro(self.refresh_account_status())
+
+    def _schedule_coro(self, coro):
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            try:
+                coro.close()
+            except Exception:
+                pass
+            return
+        loop.create_task(coro)
 
     async def load_thumbnail(self, message_id, widget):
-        thumb_dir = os.path.join(os.environ.get('TEMP', ''), 'cloudgram_thumbs')
+        thumb_dir = os.path.join(os.environ.get("TEMP", ""), "cloudgram_thumbs")
         os.makedirs(thumb_dir, exist_ok=True)
         thumb_path = os.path.join(thumb_dir, f"thumb_{message_id}.jpg")
-        
         if not os.path.exists(thumb_path):
             try:
                 await download_file_from_telegram(message_id, thumb_path, is_thumbnail=True)
-            except Exception as e:
-                pass
-                
+            except Exception:
+                return
         if os.path.exists(thumb_path):
-            widget.update_icon(thumb_path)
+            try:
+                widget.update_icon(thumb_path)
+            except RuntimeError:
+                return
+
+    @qasync.asyncSlot()
+    async def action_sync_telegram(self):
+        self.sync_btn.setEnabled(False)
+        self.toast.show_alert("Syncing", "Reading Telegram Saved Messages...", True, 0)
+        try:
+            from core.syncer import sync_from_telegram
+
+            if not await self._ensure_logged_in(prefill=self.account_phone_input.text().strip()):
+                return
+
+            synced = await sync_from_telegram(
+                status_callback=lambda msg: print(f"Sync-Log: {msg}", flush=True)
+            )
+            self.load_files()
+            self.toast.show_alert("Sync complete", f"Imported {synced} item(s) from Telegram.", False, 4000)
+        except asyncio.TimeoutError:
+            self.toast.show_alert("Sync failed", "Telegram connection timed out.", False, 5000)
+        except Exception as e:
+            self.toast.show_alert("Sync failed", str(e), False, 5000)
+        finally:
+            self.sync_btn.setEnabled(True)
 
     @qasync.asyncSlot()
     async def action_upload_file(self):
-        file_path, _ = QFileDialog.getOpenFileName(self, "Select File to Upload")
+        file_path, _ = QFileDialog.getOpenFileName(self, "Select file to upload")
         if file_path:
             await self.do_upload(file_path)
 
     @qasync.asyncSlot()
     async def action_upload_folder(self):
-        folder_path = QFileDialog.getExistingDirectory(self, "Select Folder to Upload")
+        folder_path = QFileDialog.getExistingDirectory(self, "Select folder to upload")
         if folder_path:
-            await self.do_upload_folder(folder_path)
-
-    async def do_upload_folder(self, folder_path):
-        folder_name = os.path.basename(folder_path) or "Archive"
-        self.upload_btn.setEnabled(False)
-        self.toast.show_alert("Zipping", f"Compressing {folder_name}...", True, 0)
-        
-        temp_zip = os.path.join(tempfile.gettempdir(), f"{folder_name}") # without .zip extension because make_archive adds it
-        out_zip = shutil.make_archive(temp_zip, 'zip', folder_path)
-        
-        await self.do_upload(out_zip, override_name=f"{folder_name}.zip", override_type="folder")
+            folder_name = os.path.basename(folder_path) or "Archive"
+            temp_zip = os.path.join(tempfile.gettempdir(), folder_name)
+            zip_path = shutil.make_archive(temp_zip, "zip", folder_path)
+            await self.do_upload(zip_path, override_name=f"{folder_name}.zip", override_type="folder")
 
     async def do_upload(self, file_path, override_name=None, override_type=None):
         self.upload_btn.setEnabled(False)
         filename = override_name or os.path.basename(file_path)
         self.toast.show_alert("Uploading", f"Preparing {filename}...", True, 0)
-        
+
         last_time = time.time()
         last_bytes = 0
-        
+
         def progress_cb(current, total):
             nonlocal last_time, last_bytes
             now = time.time()
             elapsed = now - last_time
             if elapsed > 0.5 or current == total:
                 speed = (current - last_bytes) / elapsed if elapsed > 0 else 0
-                speed_str = f"{speed / (1024*1024):.1f} MB/s" if speed > 1024 * 1024 else f"{speed / 1024:.0f} KB/s"
+                speed_str = format_size(int(speed)) + "/s" if speed > 0 else "0 B/s"
                 pct = (current / total) * 100 if total else 0
-                self.toast.update_progress(f"{pct:.1f}% ({speed_str}) - {filename}", int(pct))
+                self.toast.update_progress(f"{pct:.1f}% | {speed_str} | {filename}", int(pct))
                 last_time = now
                 last_bytes = current
 
         try:
             await upload_file_to_telegram(file_path, progress_callback=progress_cb, override_type=override_type)
-            self.toast.show_alert("Success", f"{filename} uploaded!", False, 3000)
             self.load_files()
+            self.toast.show_alert("Uploaded", f"{filename} uploaded.", False, 3000)
         except Exception as e:
-            self.toast.show_alert("Upload Failed", str(e), False, 4000)
+            self.toast.show_alert("Upload failed", str(e), False, 5000)
         finally:
             self.upload_btn.setEnabled(True)
 
     @qasync.asyncSlot()
     async def handle_download(self, message_id, filename):
-        dest_path, _ = QFileDialog.getSaveFileName(self, "Save File", filename)
-        if dest_path:
-            self.toast.show_alert("Downloading", f"Starting {filename}...", True, 0)
-            last_time = time.time()
-            last_bytes = 0
-            
-            def progress_cb(current, total):
-                nonlocal last_time, last_bytes
-                now = time.time()
-                elapsed = now - last_time
-                if elapsed > 0.5 or current == total:
-                    speed = (current - last_bytes) / elapsed if elapsed > 0 else 0
-                    speed_str = f"{speed / (1024*1024):.1f} MB/s" if speed > 1024 * 1024 else f"{speed / 1024:.0f} KB/s"
-                    pct = (current / total) * 100 if total else 0
-                    self.toast.update_progress(f"{pct:.1f}% ({speed_str}) - {filename}", int(pct))
-                    last_time = now
-                    last_bytes = current
+        dest_path, _ = QFileDialog.getSaveFileName(self, "Save file", filename)
+        if not dest_path:
+            return
 
-            try:
-                success = await download_file_from_telegram(message_id, dest_path, progress_callback=progress_cb)
-                if success:
-                    self.toast.show_alert("Success", f"File saved: {filename}", False, 3000)
-            except Exception as e:
-                self.toast.show_alert("Download Failed", str(e), False, 4000)
+        self.toast.show_alert("Downloading", f"Saving {filename}...", True, 0)
+        try:
+            ok = await download_file_from_telegram(message_id, dest_path)
+            if ok:
+                self.toast.show_alert("Saved", f"Saved {filename}.", False, 3000)
+        except Exception as e:
+            self.toast.show_alert("Download failed", str(e), False, 5000)
 
     @qasync.asyncSlot()
     async def handle_open(self, message_id, filename):
-        temp_dir = os.path.join(os.environ.get('TEMP', ''), 'cloudgram_cache')
+        temp_dir = os.path.join(os.environ.get("TEMP", ""), "cloudgram_cache")
         os.makedirs(temp_dir, exist_ok=True)
         dest_path = os.path.join(temp_dir, filename)
-        
-        self.toast.show_alert("Live Preview", f"Fetching {filename}...", True, 0)
-        
-        last_time = time.time()
-        last_bytes = 0
-        def progress_cb(current, total):
-            nonlocal last_time, last_bytes
-            now = time.time()
-            elapsed = now - last_time
-            if elapsed > 0.5 or current == total:
-                speed = (current - last_bytes) / elapsed if elapsed > 0 else 0
-                speed_str = f"{speed / (1024*1024):.1f} MB/s" if speed > 1024 * 1024 else f"{speed / 1024:.0f} KB/s"
-                pct = (current / total) * 100 if total else 0
-                self.toast.update_progress(f"{pct:.1f}% ({speed_str})", int(pct))
-                last_time = now
-                last_bytes = current
-
+        self.toast.show_alert("Opening", f"Fetching {filename}...", True, 0)
         try:
-            success = await download_file_from_telegram(message_id, dest_path, progress_callback=progress_cb)
-            if success:
-                self.toast.show_alert("Success", f"Opening {filename}!", False, 2000)
+            ok = await download_file_from_telegram(message_id, dest_path)
+            if ok:
+                self.toast.show_alert("Ready", f"Opening {filename}.", False, 2000)
                 os.startfile(dest_path)
-            else:
-                self.toast.fade_out()
         except Exception as e:
-            self.toast.show_alert("Error", str(e), False, 4000)
-
-    # ═══════════════════════════════════════════════════════════════════════
-    # Google Account helpers
-    # ═══════════════════════════════════════════════════════════════════════
-
-    def _refresh_google_btn(self):
-        if is_google_connected():
-            self.google_btn.setText("✓  Google Connected")
-            self.google_btn.setStyleSheet("""
-                QPushButton { background:#e8f5e9; color:#2e7d32; border:1px solid #4caf50;
-                              border-radius:8px; font-size:12px; font-weight:600; }
-                QPushButton:hover { background:#c8e6c9; }
-            """)
-        else:
-            self.google_btn.setText("🔗  Connect Google")
-            self.google_btn.setStyleSheet("""
-                QPushButton { background:#fff3e0; color:#e65100; border:1px solid #ff9800;
-                              border-radius:8px; font-size:12px; font-weight:600; }
-                QPushButton:hover { background:#ffe0b2; }
-            """)
-
-    def _toggle_google(self):
-        if is_google_connected():
-            disconnect_google()
-            self._refresh_google_btn()
-            self.toast.show_alert("Disconnected", "Google account unlinked.", False, 3000)
-        else:
-            asyncio.create_task(self._connect_google_task())
-
-    async def _connect_google_task(self):
-        self.google_btn.setEnabled(False)
-        self.toast.show_alert("Connecting", "Opening browser for Google sign-in…", False, 0)
-        try:
-            await connect_google_async()
-            self._refresh_google_btn()
-            self.toast.show_alert("Success", "Google account connected!", False, 3000)
-        except FileNotFoundError as e:
-            QMessageBox.warning(self, "Missing credentials.json", str(e))
-        except Exception as e:
-            self.toast.show_alert("Google Error", str(e), False, 5000)
-        finally:
-            self.google_btn.setEnabled(True)
-
-    # ═══════════════════════════════════════════════════════════════════════
-    # Content area helpers
-    # ═══════════════════════════════════════════════════════════════════════
-
-    def _clear_content(self):
-        while self.pinned_grid.count():
-            item = self.pinned_grid.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-        while self.recent_list.count():
-            item = self.recent_list.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-
-    def _show_status(self, text: str):
-        lbl = QLabel(text)
-        lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lbl.setWordWrap(True)
-        lbl.setStyleSheet("color:#aaa; font-size:14px; padding:40px; border:none;")
-        self.recent_list.addWidget(lbl)
-
-    # ═══════════════════════════════════════════════════════════════════════
-    # Google Photos
-    # ═══════════════════════════════════════════════════════════════════════
-
-    async def _load_google_photos(self):
-        self._clear_content()
-        if not GOOGLE_AVAILABLE:
-            self._show_status("Google packages not installed.\nRun: pip install -r requirements.txt")
-            return
-        if not is_google_connected():
-            self._show_status("Connect your Google account first.\nClick '🔗 Connect Google' in the sidebar.")
-            return
-
-        self._show_status("Fetching photos from Google Photos…")
-        try:
-            data = await list_media_items(page_size=50)
-        except Exception as e:
-            self._clear_content()
-            self.toast.show_alert("Google Photos Error", str(e), False, 5000)
-            return
-
-        self._clear_content()
-        media_items = data.get("mediaItems", [])
-        if not media_items:
-            self._show_status("No media found in Google Photos.")
-            return
-
-        self._gp_cache = {}
-        row, col = 0, 0
-        for it in media_items:
-            self._gp_cache[it["id"]] = it
-            meta = it.get("mediaMetadata", {})
-            is_video = "video" in meta
-            w, h = meta.get("width", 0), meta.get("height", 0)
-            size_str = f"{w}\u00d7{h}" if w and h else ""
-            color = "#fed6e3" if is_video else "#fdeadd"
-            card = FileCard(
-                it["id"], it.get("filename", "photo"),
-                size_str, color,
-                "Video" if is_video else "Photo",
-                self.handle_gp_open, self.handle_gp_download,
-            )
-            self.pinned_grid.addWidget(card, row, col)
-            col += 1
-            if col > 3:
-                col = 0
-                row += 1
-            asyncio.create_task(self._load_gp_thumb(it.get("baseUrl", ""), it["id"], card))
-
-    async def _load_gp_thumb(self, base_url: str, media_id: str, widget):
-        if not base_url:
-            return
-        thumb_dir = os.path.join(os.environ.get("TEMP", ""), "cloudgram_gp_thumbs")
-        os.makedirs(thumb_dir, exist_ok=True)
-        thumb_path = os.path.join(thumb_dir, f"gp_{media_id}.jpg")
-        if not os.path.exists(thumb_path):
-            try:
-                await gp_download_thumbnail(base_url, thumb_path, size=200)
-            except Exception:
-                return
-        if os.path.exists(thumb_path):
-            widget.update_icon(thumb_path)
-
-    @qasync.asyncSlot()
-    async def handle_gp_open(self, media_id: str, filename: str):
-        it = self._gp_cache.get(media_id, {})
-        base_url = it.get("baseUrl", "")
-        is_video = "video" in it.get("mediaMetadata", {})
-        if not base_url:
-            self.toast.show_alert("Error", "Media URL unavailable.", False, 3000)
-            return
-        temp_dir = os.path.join(os.environ.get("TEMP", ""), "cloudgram_cache")
-        os.makedirs(temp_dir, exist_ok=True)
-        dest = os.path.join(temp_dir, filename)
-        self.toast.show_alert("Downloading", f"Opening {filename}…", True, 0)
-        try:
-            await gp_download_media(base_url, dest, is_video=is_video)
-            self.toast.show_alert("Done", f"Opening {filename}", False, 2000)
-            os.startfile(dest)
-        except Exception as e:
-            self.toast.show_alert("Error", str(e), False, 4000)
-
-    @qasync.asyncSlot()
-    async def handle_gp_download(self, media_id: str, filename: str):
-        it = self._gp_cache.get(media_id, {})
-        base_url = it.get("baseUrl", "")
-        is_video = "video" in it.get("mediaMetadata", {})
-        if not base_url:
-            self.toast.show_alert("Error", "Media URL unavailable.", False, 3000)
-            return
-        dest, _ = QFileDialog.getSaveFileName(self, "Save Photo/Video", filename)
-        if not dest:
-            return
-        self.toast.show_alert("Downloading", filename, True, 0)
-        try:
-            await gp_download_media(base_url, dest, is_video=is_video)
-            self.toast.show_alert("Saved", f"File saved: {filename}", False, 3000)
-        except Exception as e:
-            self.toast.show_alert("Error", str(e), False, 4000)
-
-    # ═══════════════════════════════════════════════════════════════════════
-    # Gmail
-    # ═══════════════════════════════════════════════════════════════════════
-
-    async def _load_gmail(self):
-        self._clear_content()
-        if not GOOGLE_AVAILABLE:
-            self._show_status("Google packages not installed.\nRun: pip install -r requirements.txt")
-            return
-        if not is_google_connected():
-            self._show_status("Connect your Google account first.\nClick '🔗 Connect Google' in the sidebar.")
-            return
-
-        self._show_status("Fetching emails with attachments from Gmail…")
-        try:
-            messages = await list_messages_with_attachments(max_results=30)
-        except Exception as e:
-            self._clear_content()
-            self.toast.show_alert("Gmail Error", str(e), False, 5000)
-            return
-
-        self._clear_content()
-        if not messages:
-            self._show_status("No emails with attachments found.")
-            return
-
-        for msg in messages:
-            item = GmailMessageItem(
-                msg,
-                on_download=self._gmail_download,
-                on_open=self._gmail_open,
-            )
-            self.recent_list.addWidget(item)
-
-    def _gmail_download(self, att: dict):
-        asyncio.create_task(self._gmail_download_task(att))
-
-    def _gmail_open(self, att: dict):
-        asyncio.create_task(self._gmail_open_task(att))
-
-    async def _gmail_download_task(self, att: dict):
-        dest, _ = QFileDialog.getSaveFileName(self, "Save Attachment", att["filename"])
-        if not dest:
-            return
-        self.toast.show_alert("Downloading", att["filename"], True, 0)
-        try:
-            await gmail_download_attachment(att["message_id"], att["attachment_id"], dest)
-            self.toast.show_alert("Saved", f"Saved: {att['filename']}", False, 3000)
-        except Exception as e:
-            self.toast.show_alert("Error", str(e), False, 4000)
-
-    async def _gmail_open_task(self, att: dict):
-        temp_dir = os.path.join(os.environ.get("TEMP", ""), "cloudgram_cache")
-        os.makedirs(temp_dir, exist_ok=True)
-        dest = os.path.join(temp_dir, att["filename"])
-        self.toast.show_alert("Opening", att["filename"], True, 0)
-        try:
-            await gmail_download_attachment(att["message_id"], att["attachment_id"], dest)
-            self.toast.show_alert("Done", f"Opening {att['filename']}", False, 2000)
-            os.startfile(dest)
-        except Exception as e:
-            self.toast.show_alert("Error", str(e), False, 4000)
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Gmail message widget
-# ═══════════════════════════════════════════════════════════════════════════
-
-class GmailMessageItem(QFrame):
-    """Shows one Gmail message with its attachments inside the recent-list."""
-
-    def __init__(self, msg_data: dict, on_download, on_open, parent=None):
-        super().__init__(parent)
-        self.setStyleSheet("""
-            GmailMessageItem { background:white; border:1px solid #e5e5e5;
-                               border-radius:8px; margin-bottom:8px; }
-            GmailMessageItem:hover { background:#fbfbfb; border:1px solid #d0d0d0; }
-            QLabel { border:none; }
-        """)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(15, 12, 15, 12)
-        layout.setSpacing(5)
-
-        # ── Header row ──────────────────────────────────────────────────────
-        hdr = QHBoxLayout()
-        sender = QLabel(msg_data.get("from", "Unknown")[:45])
-        sender.setStyleSheet("font-weight:600; font-size:13px; color:#222;")
-        date_lbl = QLabel(msg_data.get("date", "")[:16])
-        date_lbl.setStyleSheet("font-size:11px; color:#888;")
-        hdr.addWidget(sender)
-        hdr.addStretch()
-        hdr.addWidget(date_lbl)
-        layout.addLayout(hdr)
-
-        # ── Subject ─────────────────────────────────────────────────────────
-        subj = QLabel(msg_data.get("subject", "(no subject)"))
-        subj.setWordWrap(True)
-        subj.setStyleSheet("font-size:12px; color:#444;")
-        layout.addWidget(subj)
-
-        # ── Attachments ─────────────────────────────────────────────────────
-        for att in msg_data.get("attachments", []):
-            row = QHBoxLayout()
-
-            icon = QLabel("\U0001f4ce")
-            icon.setStyleSheet("font-size:13px;")
-
-            name_lbl = QLabel(att["filename"])
-            name_lbl.setStyleSheet("font-size:11px; color:#1a73e8;")
-
-            sz = att.get("size", 0)
-            sz_str = f"{sz/1024:.0f} KB" if sz > 0 else ""
-            sz_lbl = QLabel(sz_str)
-            sz_lbl.setStyleSheet("font-size:11px; color:#888;")
-
-            open_btn = QPushButton("Open")
-            open_btn.setFixedSize(54, 24)
-            open_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            open_btn.setStyleSheet("""
-                QPushButton { background:#f0f7ff; border:1px solid #1a73e8;
-                              border-radius:4px; font-size:11px; color:#1a73e8; }
-                QPushButton:hover { background:#1a73e8; color:white; }
-            """)
-            open_btn.clicked.connect(lambda _, a=att: on_open(a))
-
-            save_btn = QPushButton("Save")
-            save_btn.setFixedSize(54, 24)
-            save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            save_btn.setStyleSheet("""
-                QPushButton { background:#f5f5f5; border:1px solid #ccc;
-                              border-radius:4px; font-size:11px; color:#444; }
-                QPushButton:hover { background:#e0e0e0; }
-            """)
-            save_btn.clicked.connect(lambda _, a=att: on_download(a))
-
-            row.addWidget(icon)
-            row.addWidget(name_lbl)
-            row.addWidget(sz_lbl)
-            row.addStretch()
-            row.addWidget(open_btn)
-            row.addWidget(save_btn)
-            layout.addLayout(row)
+            self.toast.show_alert("Open failed", str(e), False, 5000)

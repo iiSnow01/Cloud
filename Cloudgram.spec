@@ -5,7 +5,7 @@ a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[('static', 'static'), ('cloudgram.db', '.')],
+    datas=[],
     hiddenimports=['telethon', 'qasync', 'PyQt6', 'sqlite3'],
     hookspath=[],
     hooksconfig={},

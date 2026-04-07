@@ -8,7 +8,6 @@ the DB was wiped or the app was reinstalled.
 
 import os
 import logging
-from cloud_auth.login import get_client
 from db.local_db import init_db, upsert_file
 
 log = logging.getLogger(__name__)
@@ -16,6 +15,8 @@ log = logging.getLogger(__name__)
 
 def _classify_ext(ext: str) -> str:
     ext = ext.lower()
+    if ext in {'.zip', '.rar', '.7z', '.tar', '.gz', '.bz2', '.xz'}:
+        return 'folder'
     if ext in {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.heic'}:
         return 'image'
     if ext in {'.mp4', '.avi', '.mkv', '.mov', '.webm', '.flv'}:
@@ -30,6 +31,8 @@ async def sync_from_telegram(status_callback=None):
 
     status_callback(str) -- optional; called with a human-readable progress string.
     """
+    from cloud_auth.login import get_client
+
     client = get_client()
     if not client.is_connected():
         await client.connect()

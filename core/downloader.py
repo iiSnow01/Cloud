@@ -1,6 +1,6 @@
-from cloud_auth.login import get_client
-
 async def download_file_from_telegram(message_id, dest_path, progress_callback=None, is_thumbnail=False):
+    from cloud_auth.login import get_client
+
     client = get_client()
     if not client.is_connected():
         await client.connect()
