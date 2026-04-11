@@ -81,7 +81,7 @@ class PrimaryButton(QPushButton):
         self.setFont(QFont("Segoe UI Semibold", 11))
         self.setStyleSheet(
             f"""
-            QPushButton {
+            QPushButton {{
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {LOGIN_PALETTE['mint']}, stop:1 {LOGIN_PALETTE['cyan']});
                 color: white;
                 border: none;
@@ -89,17 +89,17 @@ class PrimaryButton(QPushButton):
                 padding: 0 18px;
                 font-size: 14px;
                 font-weight: 700;
-            }
-            QPushButton:hover {
+            }}
+            QPushButton:hover {{
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #96f7d4, stop:1 #33d4ff);
-            }
-            QPushButton:pressed {
+            }}
+            QPushButton:pressed {{
                 background: #00a6d8;
-            }
-            QPushButton:disabled {
+            }}
+            QPushButton:disabled {{
                 background: #425160;
                 color: #cbd5e1;
-            }
+            }}
             """
         )
 
@@ -111,21 +111,21 @@ class ModernLineEdit(QLineEdit):
         self.setFont(QFont("Segoe UI", 12))
         self.setStyleSheet(
             f"""
-            QLineEdit {
+            QLineEdit {{
                 background: rgba(255, 255, 255, 0.06);
                 border: 1px solid rgba(148, 163, 184, 0.35);
                 border-radius: 15px;
                 padding: 0 16px;
                 color: {LOGIN_PALETTE['text']};
                 selection-background-color: {LOGIN_PALETTE['cyan']};
-            }
-            QLineEdit:focus {
+            }}
+            QLineEdit:focus {{
                 background: rgba(255, 255, 255, 0.09);
                 border: 1px solid {LOGIN_PALETTE['mint']};
-            }
-            QLineEdit::placeholder {
+            }}
+            QLineEdit::placeholder {{
                 color: rgba(226, 232, 240, 0.45);
-            }
+            }}
             """
         )
 
@@ -240,11 +240,11 @@ class LoginScreen(QDialog):
         self.card.setGeometry(18, 18, 424, 524)
         self.card.setStyleSheet(
             f"""
-            QFrame {
+            QFrame {{
                 background: {LOGIN_PALETTE['card']};
                 border-radius: 28px;
                 border: 1px solid {LOGIN_PALETTE['border']};
-            }
+            }}
             """
         )
 

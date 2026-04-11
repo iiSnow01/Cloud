@@ -128,77 +128,11 @@ def show_window_notice(window, title: str, message: str, *, auto_hide_ms: int = 
         toast.show_alert(title, message, False, auto_hide_ms)
 
 
-async def bootstrap_telegram(window):
-    print(">>> Stage 3: Connecting to Telegram in background...", flush=True)
-    try:
-        from cloud_auth.login import get_client
-
-        client = get_client()
-        await asyncio.wait_for(client.connect(), timeout=30)
-    except asyncio.TimeoutError:
-        show_window_notice(
-            window,
-            "Offline mode",
-            "Telegram timed out. Cached files are still available.",
-            auto_hide_ms=7000,
-        )
-        return
-    except Exception as e:
-        show_window_notice(
-            window,
-            "Offline mode",
-            f"Telegram is unavailable: {e}",
-            auto_hide_ms=7000,
-        )
-        return
-
-    if not await client.is_user_authorized():
-        print(">>> Stage 4: Login required. Showing screen...", flush=True)
-        from ui.login_screen import LoginScreen
-
-        login_screen = LoginScreen(client, parent=window)
-        login_screen.show()
-        await login_screen.wait_for_login()
-
-        if not await client.is_user_authorized():
-            show_window_notice(
-                window,
-                "Login required",
-                "Telegram login was not completed. Online actions stay unavailable.",
-                auto_hide_ms=7000,
-            )
-            return
-
-    print(">>> Stage 5: Syncing latest history in background...", flush=True)
-    try:
-        from core.syncer import sync_from_telegram
-
-        synced = await sync_from_telegram(
-            status_callback=lambda msg: print(f"Sync-Log: {msg}", flush=True)
-        )
-        print(f">>> Sync finished - {synced} files updated.", flush=True)
-        window.load_files()
-        show_window_notice(
-            window,
-            "Sync complete",
-            f"Telegram sync refreshed {synced} file(s).",
-            auto_hide_ms=3000,
-        )
-    except Exception as e:
-        show_window_notice(
-            window,
-            "Sync error",
-            f"Telegram sync failed: {e}",
-            auto_hide_ms=7000,
-        )
-
-
 async def main():
     # Lazy imports inside the coroutine so any ImportError is caught cleanly.
     print(">>> Stage 1: Initializing DB...", flush=True)
     try:
         from db.local_db import init_db
-
         init_db()
     except Exception as e:
         print(f"!!! DB Error: {e}", flush=True)
@@ -208,16 +142,70 @@ async def main():
         print("!!! Error: QApplication was not initialized.", flush=True)
         return
 
-    print(">>> Stage 2: Launching Main Interface...", flush=True)
+    print(">>> Stage 2: Connecting to Telegram...", flush=True)
+    from cloud_auth.login import get_client
+    
+    client = get_client()
+    try:
+        await asyncio.wait_for(client.connect(), timeout=30)
+    except asyncio.TimeoutError:
+        print("!!! Telegram connection timed out.", flush=True)
+    except Exception as e:
+        print(f"!!! Telegram is unavailable: {e}", flush=True)
+
+    if not await client.is_user_authorized():
+        print(">>> Stage 3: Login required. Showing screen...", flush=True)
+        from ui.login_screen import LoginScreen
+
+        login_screen = LoginScreen(client)
+        login_screen.show()
+        await login_screen.wait_for_login()
+
+        if not await client.is_user_authorized():
+            print("!!! Login cancelled or failed.", flush=True)
+            return
+
+    try:
+        me = await client.get_me()
+        if me:
+            import os
+            os.environ["CLOUDGRAM_OWNER_ID"] = str(me.id)
+            os.environ["CLOUDGRAM_OWNER_PHONE"] = str(getattr(me, 'phone', 'Unknown'))
+    except Exception as e:
+        print(f"!!! Error getting user profile: {e}", flush=True)
+
+    print(">>> Stage 4: Launching Main Interface...", flush=True)
     from ui.main_window import MainWindow
 
     window = MainWindow()
     window.show()
     window.load_files()
 
-    bootstrap_task = None
     if should_autosync_on_startup():
-        bootstrap_task = asyncio.create_task(bootstrap_telegram(window))
+        print(">>> Stage 5: Syncing latest history in background...", flush=True)
+        async def do_sync():
+            try:
+                from core.syncer import sync_from_telegram
+                synced = await sync_from_telegram(
+                    status_callback=lambda msg: print(f"Sync-Log: {msg}", flush=True)
+                )
+                print(f">>> Sync finished - {synced} files updated.", flush=True)
+                window.load_files()
+                show_window_notice(
+                    window,
+                    "Sync complete",
+                    f"Telegram sync refreshed {synced} file(s).",
+                    auto_hide_ms=3000,
+                )
+            except Exception as e:
+                print(f"!!! Sync error: {e}", flush=True)
+                show_window_notice(
+                    window,
+                    "Sync error",
+                    f"Telegram sync failed: {e}",
+                    auto_hide_ms=7000,
+                )
+        asyncio.create_task(do_sync())
     else:
         print(">>> Startup Telegram sync is disabled. Opening local library only.", flush=True)
 
@@ -226,10 +214,7 @@ async def main():
         while window.isVisible():
             await asyncio.sleep(0.5)
     finally:
-        if bootstrap_task is not None:
-            bootstrap_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await bootstrap_task
+        pass
 if __name__ == "__main__":
     print("=== Starting Cloudgram ===", flush=True)
 

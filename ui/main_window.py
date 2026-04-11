@@ -518,6 +518,32 @@ class MainWindow(QMainWindow):
         self.index_label.setWordWrap(True)
         self.index_label.setStyleSheet("font-size: 11px; color: #667789;")
         sidebar_layout.addWidget(self.index_label)
+        
+        phone_desc = os.environ.get("CLOUDGRAM_OWNER_PHONE", "")
+        if not phone_desc or phone_desc == "Unknown" or phone_desc == "None":
+            phone_desc = "Signed In"
+            
+        profile_wrap = QWidget()
+        profile_layout = QVBoxLayout(profile_wrap)
+        profile_layout.setContentsMargins(0, 14, 0, 0)
+        profile_layout.setSpacing(6)
+        
+        phone_label = QLabel(f"\U0001F4F1 {phone_desc}")
+        phone_label.setStyleSheet("font-size: 12px; font-weight: 700; color: #1f2937;")
+        
+        logout_btn = QPushButton("Log out")
+        logout_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        logout_btn.setFixedHeight(30)
+        logout_btn.setStyleSheet("""
+            QPushButton { background: #ffecec; border: 1px solid #f1a8a8; border-radius: 8px; color: #b91c1c; font-size: 11px; font-weight: 600; }
+            QPushButton:hover { background: #ffdada; }
+        """)
+        logout_btn.clicked.connect(self.action_logout)
+        
+        profile_layout.addWidget(phone_label)
+        profile_layout.addWidget(logout_btn)
+        sidebar_layout.addWidget(profile_wrap)
+
         body_layout.addWidget(sidebar)
 
         content = QFrame()
@@ -595,11 +621,9 @@ class MainWindow(QMainWindow):
         toolbar_row.addWidget(self.sync_btn)
         toolbar_row.addWidget(self.upload_btn)
         content_layout.addWidget(toolbar)
-        content_layout.addWidget(self._build_account_panel())
 
         self.toast = NoticeBar()
         content_layout.addWidget(self.toast)
-        self._schedule_coro(self.refresh_account_status())
 
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
@@ -637,92 +661,7 @@ class MainWindow(QMainWindow):
         shell_layout.addWidget(body, 1)
         root.addWidget(shell)
 
-    def _build_account_panel(self):
-        frame = QFrame()
-        frame.setStyleSheet("QFrame { background: white; border: 1px solid #d7e0ea; border-radius: 14px; }")
-        layout = QVBoxLayout(frame)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(6)
 
-        status_row = QHBoxLayout()
-        status_row.setSpacing(8)
-        status_label = QLabel("Account status:")
-        status_label.setStyleSheet("font-size: 11px; color: #667789;")
-        self.account_status_label = QLabel("Not signed in")
-        self.account_status_label.setStyleSheet("font-size: 13px; font-weight: 700; color: #1f2937;")
-        status_row.addWidget(status_label)
-        status_row.addWidget(self.account_status_label)
-        status_row.addStretch()
-
-        self.logout_btn = QPushButton("Log out")
-        self.logout_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.logout_btn.setFixedHeight(36)
-        self.logout_btn.setEnabled(False)
-        self.logout_btn.setStyleSheet(
-            """
-            QPushButton {
-                background: #ffecec;
-                border: 1px solid #f1a8a8;
-                border-radius: 12px;
-                padding: 0 16px;
-                color: #b91c1c;
-                font-size: 12px;
-                font-weight: 600;
-            }
-            QPushButton:hover {
-                background: #ffdada;
-            }
-            QPushButton:disabled {
-                color: #f8d7da;
-                border-color: #f8d7da;
-                background: #fff5f5;
-            }
-            """
-        )
-        self.logout_btn.clicked.connect(self.action_logout)
-        status_row.addWidget(self.logout_btn)
-        layout.addLayout(status_row)
-
-        form_row = QHBoxLayout()
-        form_row.setSpacing(10)
-        self.account_phone_input = QLineEdit()
-        self.account_phone_input.setPlaceholderText("+1 234 567 8900")
-        self.account_phone_input.setFixedHeight(40)
-        self.account_phone_input.setStyleSheet(
-            "QLineEdit { background: #f7f9fc; border: 1px solid #d7e0ea; border-radius: 12px; padding: 0 12px; font-size: 12px; color: #243041; }"
-            " QLineEdit:focus { border: 1px solid #7baeff; background: white; }"
-        )
-        form_row.addWidget(self.account_phone_input, 1)
-
-        self.signin_btn = QPushButton("Sign in")
-        self.signin_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.signin_btn.setFixedHeight(40)
-        self.signin_btn.setStyleSheet(
-            """
-            QPushButton {
-                background: #f5f8fc;
-                border: 1px solid #d7e0ea;
-                border-radius: 12px;
-                padding: 0 16px;
-                color: #243041;
-                font-size: 12px;
-                font-weight: 700;
-            }
-            QPushButton:hover {
-                background: #eef5ff;
-                border: 1px solid #96bfff;
-            }
-            QPushButton:disabled {
-                color: #94a3b8;
-            }
-            """
-        )
-        self.signin_btn.clicked.connect(self.action_open_login)
-        form_row.addWidget(self.signin_btn)
-
-        self.account_phone_input.returnPressed.connect(self.signin_btn.click)
-        layout.addLayout(form_row)
-        return frame
 
     def on_category_changed(self):
         items = self.nav_list.selectedItems()
@@ -743,7 +682,7 @@ class MainWindow(QMainWindow):
         query = self.search_box.text().lower().strip()
         filtered = []
         for row in rows:
-            _, _, name, _, file_type, _, _ = row
+            _, _, name, _, file_type, _, _, _ = row
             if self.current_category == "Folders" and file_type != "folder":
                 continue
             if self.current_category == "Gallery" and file_type not in ("image", "video"):
@@ -774,7 +713,7 @@ class MainWindow(QMainWindow):
         self.results_title.setText("Gallery" if self.current_category == "Gallery" else "Items")
 
         for index, row in enumerate(pinned_rows):
-            _, msg_id, name, size, file_type, date_str, _ = row
+            _, msg_id, name, size, file_type, date_str, _, _ = row
             card = FileCard(
                 msg_id,
                 name,
@@ -803,7 +742,7 @@ class MainWindow(QMainWindow):
             grid.setHorizontalSpacing(14)
             grid.setVerticalSpacing(14)
             for index, row in enumerate(other_rows):
-                _, msg_id, name, size, file_type, date_str, _ = row
+                _, msg_id, name, size, file_type, date_str, _, _ = row
                 card = FileCard(
                     msg_id,
                     name,
@@ -819,7 +758,7 @@ class MainWindow(QMainWindow):
             return
 
         for row in other_rows:
-            _, msg_id, name, size, file_type, date_str, _ = row
+            _, msg_id, name, size, file_type, date_str, _, _ = row
             item = RecentItem(
                 msg_id,
                 name,
@@ -833,100 +772,12 @@ class MainWindow(QMainWindow):
             if file_type in ("image", "video"):
                 self._schedule_coro(self.load_thumbnail(msg_id, item))
 
-    async def refresh_account_status(self):
-        from cloud_auth.login import get_client
 
-        client = get_client()
-        try:
-            if not client.is_connected():
-                await asyncio.wait_for(client.connect(), timeout=12)
-        except asyncio.TimeoutError:
-            self.account_status_label.setText("Telegram offline")
-            self.logout_btn.setEnabled(False)
-            self.signin_btn.setEnabled(True)
-            self.account_phone_input.setEnabled(True)
-            return
-        except Exception:
-            self.account_status_label.setText("Telegram unavailable")
-            self.logout_btn.setEnabled(False)
-            self.signin_btn.setEnabled(True)
-            self.account_phone_input.setEnabled(True)
-            return
-
-        if not await client.is_user_authorized():
-            self.account_status_label.setText("Not signed in")
-            self.logout_btn.setEnabled(False)
-            self.signin_btn.setText("Sign in")
-            self.signin_btn.setEnabled(True)
-            self.account_phone_input.setEnabled(True)
-            return
-
-        try:
-            me = await client.get_me()
-        except Exception:
-            me = None
-
-        label_text = "Signed in"
-        if me:
-            number = getattr(me, "phone", None)
-            username = getattr(me, "username", None)
-            if number:
-                label_text = f"Signed in as {number}"
-                self.account_phone_input.setText(number)
-                self.account_phone_input.setEnabled(False)
-            elif username:
-                label_text = f"Signed in as @{username}"
-            else:
-                label_text = f"Signed in as {getattr(me, 'id', 'user')}"
-
-        self.account_status_label.setText(label_text)
-        self.logout_btn.setEnabled(True)
-        self.signin_btn.setText("Re-sync")
-        self.signin_btn.setEnabled(True)
-
-    async def _ensure_logged_in(self, prefill=None):
-        from cloud_auth.login import get_client
-        from ui.login_screen import LoginScreen
-
-        client = get_client()
-        try:
-            if not client.is_connected():
-                await asyncio.wait_for(client.connect(), timeout=20)
-        except asyncio.TimeoutError:
-            self.toast.show_alert("Telegram offline", "Connection timed out.", False, 5000)
-            return False
-        except Exception:
-            self.toast.show_alert("Telegram error", "Unable to reach Telegram.", False, 5000)
-            return False
-
-        if await client.is_user_authorized():
-            return True
-
-        login_phone = prefill or self.account_phone_input.text().strip()
-        login_screen = LoginScreen(client, parent=self, initial_phone=login_phone or None)
-        login_screen.show()
-        await login_screen.wait_for_login()
-        if await client.is_user_authorized():
-            self.toast.show_alert("Login complete", "Telegram account is ready.", False, 3000)
-            self._schedule_coro(self.refresh_account_status())
-            return True
-
-        self.toast.show_alert("Login required", "Telegram login was not completed.", False, 4000)
-        return False
-
-    @qasync.asyncSlot()
-    async def action_open_login(self):
-        self.signin_btn.setEnabled(False)
-        try:
-            await self._ensure_logged_in(prefill=self.account_phone_input.text().strip())
-        finally:
-            self.signin_btn.setEnabled(True)
 
     @qasync.asyncSlot()
     async def action_logout(self):
         from cloud_auth.login import get_client, SESSION_NAME
 
-        self.logout_btn.setEnabled(False)
         client = get_client()
         try:
             await client.log_out()
@@ -945,12 +796,8 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
 
-        self.account_phone_input.clear()
-        self.account_phone_input.setEnabled(True)
-        self.account_status_label.setText("Signed out")
-        self.signin_btn.setText("Sign in")
-        self.toast.show_alert("Logged out", "Telegram session cleared.", False, 4000)
-        self._schedule_coro(self.refresh_account_status())
+        import sys
+        sys.exit(0)
 
     def _schedule_coro(self, coro):
         try:
@@ -984,9 +831,6 @@ class MainWindow(QMainWindow):
         self.toast.show_alert("Syncing", "Reading Telegram Saved Messages...", True, 0)
         try:
             from core.syncer import sync_from_telegram
-
-            if not await self._ensure_logged_in(prefill=self.account_phone_input.text().strip()):
-                return
 
             synced = await sync_from_telegram(
                 status_callback=lambda msg: print(f"Sync-Log: {msg}", flush=True)
