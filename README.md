@@ -41,8 +41,8 @@ Cloudgram is powered by a robust stack of modern Python libraries:
 ### Manual Setup
 1.  **Clone the Repository**:
     ```bash
-    git clone https://github.com/yourusername/Cloudgram.git
-    cd Cloudgram
+    git clone https://github.com/iiSnow01/Cloud.git
+    cd Cloud
     ```
 
 2.  **Create a Virtual Environment**:
@@ -73,6 +73,18 @@ Set `CLOUDGRAM_AUTOSYNC=0` before launch only if you want to skip the startup Te
 
 ### First Run
 Upon first launch (if you haven't created an account session before), you will be prompted to enter your Telegram phone number to log in. Once authenticated, Cloudgram will sync your Telegram library automatically. Cloudgram keeps `cloudgram_session.session`, `cloudgram.db`, and `cloudgram_launch.log` alongside the app in packaged builds, and alongside the repo in development.
+
+---
+
+## Offline search example
+
+After installing the dependencies, run this from the repository root:
+
+~~~sh
+python -m examples.local_index index-demo.png
+~~~
+
+The example starts the real Cloudgram window with a temporary SQLite index, searches for `report`, and saves the two matching rows to a PNG. It uses fictional filenames and does not connect to Telegram or change your local library. The application still needs a Telegram account for upload, download and sync.
 
 ---
 
